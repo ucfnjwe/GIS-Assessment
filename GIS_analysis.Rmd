@@ -1,0 +1,277 @@
+---
+title: "edin_analysis"
+output: word_document
+---
+
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(warning=FALSE, message=FALSE)
+```
+
+```{r setup}
+library(tidyverse)
+library(car)
+library(ggplot2)
+library(magrittr)
+library(corrplot)
+library(rgdal)
+library(broom)
+library(maptools)
+library(wesanderson)
+library(factoextra)
+library(gridExtra)
+library(spgwr)
+```
+
+## Load data & Clean data
+```{r load_data}
+shape_file <- readOGR(dsn = "simd2020_edinburgh/", 
+                      layer = "simd2020_edinburgh")
+
+spdf_fortified <- tidy(shape_file) 
+spdf_fortified <- spdf_fortified %>% mutate(id = as.integer(id))
+dat <- shape_file@data %>% select(Data_Zone, DEPRESS, ALCOHOL, 
+                                  crime_rate, employment,
+                             X, Y)
+dat <- dat %>% 
+  mutate(id = seq(0,nrow(dat)-1)) %>% 
+  tibble()
+
+
+# Data cleaning
+dat <- dat %>% 
+  tibble() %>% 
+  mutate(DEPRESS = as.numeric(sub("%", "", DEPRESS)) / 100,
+         employment = as.numeric(sub("%", "", employment)) / 100,
+         crime_rate = as.integer(crime_rate),
+         ALCOHOL = as.integer(ALCOHOL))
+
+## Remove a value of 0
+dat <- dat %>%
+  mutate(ALCOHOL = ifelse(ALCOHOL == 0, NA, ALCOHOL),
+         crime_rate = ifelse(crime_rate == 0, NA, crime_rate),
+         employment = ifelse(ALCOHOL == 0, NA, employment))
+
+```
+
+## Visualize data through boxplots
+```{r boxplot}
+
+boxplot_depress <- ggplot(dat, aes(y=DEPRESS)) +
+  geom_boxplot() + 
+  theme(axis.ticks.x = element_blank(),
+        axis.text.x=element_blank())
+
+boxplot_crime_rate <- ggplot(dat, aes(y=crime_rate)) +
+  geom_boxplot() + 
+  theme(axis.ticks.x = element_blank(),
+        axis.text.x=element_blank())
+
+boxplot_employment <- ggplot(dat, aes(y=employment)) +
+  geom_boxplot() + 
+  theme(axis.ticks.x = element_blank(),
+        axis.text.x=element_blank())
+
+boxplot_alcohol <- ggplot(dat, aes(y=ALCOHOL)) +
+  geom_boxplot() + 
+  theme(axis.ticks.x = element_blank(),
+        axis.text.x=element_blank())
+
+grid.arrange(boxplot_depress,
+             boxplot_alcohol,
+             boxplot_crime_rate,
+             boxplot_employment,
+             nrow = 2)
+
+
+```
+
+## Remove outliers based on IQR methdology
+```{r remove_outlier}
+
+depress_outlier <- boxplot.stats(dat$DEPRESS)$out
+crime_outlier <- boxplot.stats(dat$crime_rate)$out
+emp_outlier <- boxplot.stats(dat$employment)$out
+alcohol_outlier <- boxplot.stats(dat$ALCOHOL)$out
+
+# Replace outlier with NA
+dat <- dat %>%
+  mutate(DEPRESS = ifelse(DEPRESS %in% depress_outlier, NA, DEPRESS),
+         ALCOHOL = ifelse(ALCOHOL %in% alcohol_outlier, NA, ALCOHOL),
+         crime_rate = ifelse(crime_rate %in% crime_outlier, NA, crime_rate),
+         employment = ifelse(employment %in% emp_outlier, NA, employment))
+
+## create spatial data
+spatial_dat <- dat %>% inner_join(spdf_fortified, by = "id")
+
+## Remove NA(outlier)
+dat <- dat %>% filter(!is.na(DEPRESS),
+                      !is.na(crime_rate), 
+                      !is.na(employment), 
+                      !is.na(ALCOHOL))
+```
+
+## VIF
+
+```{r vif}
+lm_mod <- lm(DEPRESS~ crime_rate + employment + ALCOHOL,  data = dat)
+
+# all less than 5
+vif(lm_mod)
+
+```
+
+## Data visulization - Correlation map
+``` {r correlation}
+
+correlation = cor(dat %>% select(DEPRESS,
+                                 ALCOHOL,
+                                 crime_rate,
+                                 employment))
+corrplot(correlation, method = 'color')
+```
+
+## Data visulization - Scatter grid
+``` {r scatter_grid}
+## Scatter grid
+pairs(dat %>% select(DEPRESS,
+                     ALCOHOL,
+                     crime_rate,
+
+                       employment)
+        , pch = 19)
+
+```
+
+## Data visulization - Heat Map
+``` {r heat_map}
+## Heat maps
+
+pal <- wes_palette("Zissou1", 100, type = "continuous")
+
+depress_map <- ggplot() + 
+  geom_polygon(data = spatial_dat, aes(x = long,
+                                       y = lat, 
+                                       group = group,
+                                       fill = DEPRESS)) + 
+  scale_fill_gradientn(colours = pal)
+
+crime_rate_map <- ggplot() + 
+  geom_polygon(data = spatial_dat, aes(x = long,
+                                       y = lat, 
+                                       group = group,
+                                       fill = crime_rate)) +
+  scale_fill_gradientn(colours = pal)
+
+
+alcohol_map <- ggplot() + 
+  geom_polygon(data = spatial_dat, aes(x = long,
+                                       y = lat, 
+                                       group = group,
+                                       fill = ALCOHOL)) +
+  scale_fill_gradientn(colours = pal)
+
+employment_map <- ggplot() + 
+  geom_polygon(data = spatial_dat, aes(x = long,
+                                       y = lat, 
+                                       group = group,
+                                       fill = employment)) + 
+  scale_fill_gradientn(colours = pal)
+
+grid.arrange(depress_map,
+             alcohol_map,
+             crime_rate_map,
+             employment_map,
+             nrow = 2)
+```
+
+## K-means with elbow method
+```{r k_means_1}
+
+# scale data
+scale_dat <- scale(dat %>% 
+                     select(DEPRESS,
+                            ALCOHOL,
+                            crime_rate,
+                            employment))
+
+## Elbow method
+fviz_nbclust(scale_dat, kmeans, method = "wss") + 
+geom_vline(xintercept = 3, linetype = 2)
+```
+
+## K-means cluster map
+```{r k_means_2}
+## Add cluster info
+set.seed(1)
+kmean_model <- kmeans(scale_dat, centers = 3, nstart = 25)
+dat <- dat %>% 
+  mutate(cluster = factor(kmean_model$cluster))
+
+spatial_dat <- spatial_dat %>%
+  left_join(dat %>% select(id, cluster))
+
+ggplot() + 
+  geom_polygon(data = spatial_dat, aes(x = long,
+                                       y = lat, 
+                                       group = group,
+                                       fill = cluster)) 
+
+
+```
+
+## K-means cluster profile
+- Cluster 1 has the least depression rate and the lowest crime rate, alcohol hospitalization and employment deprivation.
+- Cluster 2 has the most depression rate and the highest crime rate, alcohol hospitalization and employment deprivation.
+- Cluster 3 is in the middle between Cluster 1 and 2.
+- Most areas belong to Cluster 1, which has the least depression rate.
+```{r k_means_cluster profile}
+
+## cluster profiles
+dat %>% 
+  group_by(cluster) %>% 
+  summarize(count = n())
+
+depress_plot <- ggplot(data = dat, aes(x = DEPRESS, fill = cluster)) +
+  geom_density(alpha = 0.4)
+alcohol_plot <- ggplot(data = dat, aes(x = ALCOHOL, fill = cluster)) + 
+  geom_density(alpha = 0.4)
+crime_plot <- ggplot(data = dat, aes(x = crime_rate, fill = cluster)) + 
+  geom_density(alpha = 0.4)
+employment_plot <- ggplot(data = dat, 
+                          aes(x = employment, fill = cluster)) + 
+  geom_density(alpha = 0.4)
+
+grid.arrange(depress_plot, 
+             alcohol_plot,
+             crime_plot,
+             employment_plot,
+             nrow = 2)
+```
+
+## OLS regression
+```{r ols}
+
+summary(lm_mod)
+
+```
+
+## GWR
+```{r gwr}
+
+fbw <- gwr.sel(formula = DEPRESS ~ ALCOHOL + crime_rate + employment, 
+               data = dat, 
+               coords=cbind(dat$X, dat$Y),
+               longlat = TRUE,
+               adapt=FALSE, 
+               gweight = gwr.Gauss, 
+               verbose = FALSE)
+
+gwr_model <- gwr(formula = DEPRESS ~ ALCOHOL + crime_rate + employment,
+                 coords = cbind(dat$X, dat$Y),
+                 data = dat,
+                 bandwidth = fbw,
+                 hatmatrix = T,
+                 se.fit = T)
+
+gwr_model
+```
